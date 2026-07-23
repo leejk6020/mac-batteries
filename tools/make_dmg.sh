@@ -4,9 +4,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP="build/BatteryBar.app"
+# Override APP to package a different build — make_release_dmg.sh passes the
+# notarized, Developer ID signed one. NOTARIZED=1 swaps the Gatekeeper workaround
+# in the bundled guide for a plain install note.
+APP="${APP:-build/BatteryBar.app}"
+NOTARIZED="${NOTARIZED:-0}"
 VOL="BatteryBar"
-OUT="dist/BatteryBar.dmg"
+OUT="${OUT:-dist/BatteryBar.dmg}"
 
 [ -d "$APP" ] || { echo "✗ $APP not found — run ./build.sh first"; exit 1; }
 
@@ -19,6 +23,35 @@ cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"   # drag-to-install target
 
 echo "→ Writing install guide"
+if [ "$NOTARIZED" = "1" ]; then
+cat > "$STAGE/먼저 읽어주세요 — READ ME.txt" <<'GUIDE'
+BatteryBar — 설치 안내 / Installation / インストール
+
+────────────────────────────────────────────────────────
+[한국어]
+1) 이 창의 BatteryBar 아이콘을 왼쪽 Applications 폴더로 드래그하세요.
+2) 응용 프로그램 폴더에서 BatteryBar를 더블클릭하세요.
+
+이 앱은 Apple의 공증(notarization)을 받았으므로 별도의 보안 설정이
+필요 없습니다. 메뉴 막대 오른쪽에 배터리 아이콘이 나타납니다.
+
+────────────────────────────────────────────────────────
+[English]
+1) Drag the BatteryBar icon onto the Applications folder shown here.
+2) Open the Applications folder and double-click BatteryBar.
+
+The app is notarized by Apple, so no security settings need changing.
+A battery icon appears on the right side of the menu bar.
+
+────────────────────────────────────────────────────────
+[日本語]
+1) このウィンドウのBatteryBarアイコンをApplicationsフォルダにドラッグします。
+2) アプリケーションフォルダでBatteryBarをダブルクリックします。
+
+このアプリはAppleの公証(notarization)を受けているため、セキュリティ設定を
+変更する必要はありません。メニューバー右側にバッテリーアイコンが表示されます。
+GUIDE
+else
 cat > "$STAGE/먼저 읽어주세요 — READ ME.txt" <<'GUIDE'
 BatteryBar — 설치 안내 / Installation / インストール
 
@@ -65,6 +98,7 @@ This is expected — open it as follows.
      xattr -dr com.apple.quarantine "/Applications/BatteryBar.app"
      その後、通常どおりBatteryBarを開きます。
 GUIDE
+fi
 
 echo "→ Creating compressed DMG"
 hdiutil create \
