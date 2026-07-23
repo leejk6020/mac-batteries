@@ -26,8 +26,21 @@ cp Info.plist "$APP_DIR/Contents/Info.plist"
 echo "→ Installing app icon"
 cp Resources/AppIcon.icns "$RES_DIR/AppIcon.icns"
 
-echo "→ Ad-hoc code signing"
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || echo "  (codesign skipped)"
+# The sandbox is off by default: it is required only for the Mac App Store, and it
+# costs AirPods support (their battery level is reachable solely through
+# system_profiler, which returns nothing once sandboxed). Opt in with:
+#   SANDBOX=1 SIGN_IDENTITY="Apple Distribution: ..." ./build.sh
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+if [ "${SANDBOX:-0}" = "1" ]; then
+    echo "→ Code signing (App Sandbox ON — no AirPods) as: $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" \
+        --entitlements BatteryBar.entitlements \
+        "$APP_DIR" >/dev/null 2>&1 || echo "  (codesign skipped)"
+else
+    echo "→ Code signing (no sandbox) as: $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" \
+        "$APP_DIR" >/dev/null 2>&1 || echo "  (codesign skipped)"
+fi
 
 echo "✓ Built: $APP_DIR"
 echo "  Run with:  open \"$APP_DIR\""

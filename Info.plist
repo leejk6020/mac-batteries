@@ -18,6 +18,13 @@
     <string>1.0.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Required by App Store Connect; also sets the Launchpad category. -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <!-- The app uses no encryption at all, so declaring this up front skips the
+         export compliance questionnaire on every upload. -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>

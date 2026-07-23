@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import IOKit
 import ServiceManagement
 import UserNotifications
 
@@ -32,7 +33,13 @@ struct L10n {
         }
     }
 
-    var header: String { t("Bluetooth Batteries", "Bluetooth 배터리", "Bluetooth バッテリー") }
+    /// Sandboxed builds can only see Apple HID accessories, never AirPods or
+    /// third-party devices, so they must not promise "Bluetooth" in general.
+    var header: String {
+        isSandboxed
+            ? t("Accessory Batteries", "액세서리 배터리", "アクセサリのバッテリー")
+            : t("Bluetooth Batteries", "Bluetooth 배터리", "Bluetooth バッテリー")
+    }
     var refresh: String { t("Refresh", "새로고침", "更新") }
     var loading: String { t("Loading…", "불러오는 중…", "読み込み中…") }
     var noDevices: String { t("No connected devices", "연결된 기기가 없습니다", "接続されたデバイスがありません") }
@@ -92,15 +99,116 @@ struct BTDevice: Identifiable {
     }
 }
 
+/// Battery levels come back as either a number or a "96%"-style string depending
+/// on the driver, so accept both shapes.
 private func parsePercent(_ value: Any?) -> Int? {
+    if let n = value as? NSNumber { return n.intValue }
     guard let s = value as? String else { return nil }
     let cleaned = s.replacingOccurrences(of: "%", with: "")
         .trimmingCharacters(in: .whitespaces)
     return Int(cleaned)
 }
 
-/// Runs `system_profiler` and parses the connected-device battery data.
-func fetchDevices() -> [BTDevice] {
+/// IORegistry classes that expose accessory battery state. Only the first is
+/// present on current macOS; the others are older Bluetooth HID drivers, kept
+/// because an unmatched class simply yields an empty iterator.
+private let batteryServiceClasses = [
+    "AppleDeviceManagementHIDEventService",
+    "BNBMouseDevice",
+    "BNBTrackpadDevice",
+    "AppleHSBluetoothDevice",
+]
+
+/// Normalizes IOKit's "38-09-fb-17-a0-f7" address form to the colon-separated,
+/// uppercase form, so a device keeps one stable id across readings.
+private func normalizeAddress(_ raw: String) -> String {
+    raw.replacingOccurrences(of: "-", with: ":").uppercased()
+}
+
+/// Builds a device from one IORegistry entry's properties, or nil if the entry
+/// isn't a connected wireless accessory (e.g. the built-in keyboard/trackpad).
+private func makeDevice(_ props: [String: Any]) -> BTDevice? {
+    // The internal top-case HID service matches the same class but has no battery
+    // of its own — the Mac's own battery is not what this app reports.
+    if (props["Built-In"] as? NSNumber)?.boolValue == true { return nil }
+
+    let main = parsePercent(props["BatteryPercent"])
+        ?? parsePercent(props["BatteryPercentSingle"])
+        ?? parsePercent(props["BatteryPercentCombined"])
+    let caseLevel = parsePercent(props["BatteryPercentCase"])
+    let left = parsePercent(props["BatteryPercentLeft"])
+    let right = parsePercent(props["BatteryPercentRight"])
+
+    let isBluetooth = (props["BluetoothDevice"] as? NSNumber)?.boolValue == true
+    let hasBatteryFlag = (props["HasBattery"] as? NSNumber)?.boolValue == true
+    let anyLevel = main ?? caseLevel ?? left ?? right
+    guard isBluetooth || hasBatteryFlag || anyLevel != nil else { return nil }
+
+    let name = (props["Product"] as? String)?
+        .trimmingCharacters(in: .whitespaces) ?? ""
+    guard !name.isEmpty else { return nil }
+
+    let address = (props["DeviceAddress"] as? String).map(normalizeAddress)
+        ?? (props["SerialNumber"] as? String)
+        ?? name
+
+    // The registry has no equivalent of system_profiler's minor type. A split
+    // left/right reading only ever comes from earbuds, which is the one case the
+    // icon picker can't infer from the product name alone.
+    let minorType = (left != nil || right != nil) ? "earbuds" : nil
+
+    return BTDevice(id: address, name: name, minorType: minorType,
+                    main: main, caseLevel: caseLevel, left: left, right: right)
+}
+
+/// Reads Apple HID accessory battery levels from the IORegistry.
+///
+/// Covers Magic Keyboard / Mouse / Trackpad, and needs no entitlement — so unlike
+/// `system_profiler` it keeps working under the App Sandbox. It does *not* cover
+/// AirPods: as of macOS 26 the registry carries no battery reading for them.
+private func fetchFromIORegistry(into byId: inout [String: BTDevice],
+                                 order: inout [String]) {
+    for serviceClass in batteryServiceClasses {
+        guard let matching = IOServiceMatching(serviceClass) else { continue }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
+                == KERN_SUCCESS else { continue }
+        defer { IOObjectRelease(iterator) }
+
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            defer { IOObjectRelease(service) }
+            var unmanaged: Unmanaged<CFMutableDictionary>?
+            guard IORegistryEntryCreateCFProperties(
+                    service, &unmanaged, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+                  let props = unmanaged?.takeRetainedValue() as? [String: Any],
+                  let incoming = makeDevice(props)
+            else { continue }
+
+            if let existing = byId[incoming.id] {
+                byId[incoming.id] = existing.merged(with: incoming)
+            } else {
+                byId[incoming.id] = incoming
+                order.append(incoming.id)
+            }
+        }
+    }
+}
+
+/// True when running inside the App Sandbox, where `system_profiler` returns an
+/// empty result rather than failing outright.
+private var isSandboxed: Bool {
+    ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+}
+
+/// Adds anything `system_profiler` can see that the registry can't — AirPods
+/// (case/left/right) and non-Apple accessories.
+///
+/// Skipped entirely under the App Sandbox: the call would succeed but hand back
+/// an empty device list, so spawning the process buys nothing.
+private func fetchFromSystemProfiler(into byId: inout [String: BTDevice],
+                                     order: inout [String]) {
+    guard !isSandboxed else { return }
+
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
     task.arguments = ["SPBluetoothDataType", "-json"]
@@ -108,11 +216,7 @@ func fetchDevices() -> [BTDevice] {
     task.standardOutput = pipe
     task.standardError = Pipe()
 
-    do {
-        try task.run()
-    } catch {
-        return []
-    }
+    do { try task.run() } catch { return }
 
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     task.waitUntilExit()
@@ -120,21 +224,15 @@ func fetchDevices() -> [BTDevice] {
     guard
         let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
         let sections = root["SPBluetoothDataType"] as? [[String: Any]]
-    else { return [] }
+    else { return }
 
-    // system_profiler can transiently list the same device (same address) twice —
-    // e.g. right after AirPods connect, one entry with only the case and another
-    // with all buds. Merge by id, coalescing each battery reading, so a device
-    // never appears as duplicate rows (which would also collide in ForEach's id).
-    var byId: [String: BTDevice] = [:]
-    var order: [String] = []
     for section in sections {
         guard let connected = section["device_connected"] as? [[String: Any]] else { continue }
         for entry in connected {
             // Each entry is a single-key dict: { "<device name>": { props... } }
             for (name, raw) in entry {
                 guard let props = raw as? [String: Any] else { continue }
-                let address = (props["device_address"] as? String) ?? name
+                let address = (props["device_address"] as? String).map(normalizeAddress) ?? name
                 let incoming = BTDevice(
                     id: address,
                     name: name,
@@ -153,6 +251,26 @@ func fetchDevices() -> [BTDevice] {
             }
         }
     }
+}
+
+/// Collects every connected accessory that reports a battery level.
+///
+/// Two sources are merged because neither is complete on its own: the IORegistry
+/// is the only one that survives the App Sandbox and is the only one that reports
+/// this Mac's Magic Keyboard, while `system_profiler` is the only one that knows
+/// about AirPods.
+func fetchDevices() -> [BTDevice] {
+    // A device can surface more than once — from both sources, or from
+    // system_profiler alone, which right after AirPods connect may list one entry
+    // with only the case level and another with all the buds. Merge by id,
+    // coalescing each reading, so a device never appears as duplicate rows (which
+    // would also collide in ForEach's id).
+    var byId: [String: BTDevice] = [:]
+    var order: [String] = []
+
+    fetchFromIORegistry(into: &byId, order: &order)
+    fetchFromSystemProfiler(into: &byId, order: &order)
+
     let devices = order.compactMap { byId[$0] }
 
     // Devices with a battery first, then the rest; each group sorted by name.
@@ -488,15 +606,20 @@ struct ContentView: View {
 
             // Settings
             VStack(spacing: 8) {
-                Toggle(isOn: $launchAtLogin) {
+                // Written through a custom binding rather than .onChange: the
+                // two-parameter onChange is macOS 14+, and the one-parameter form
+                // is deprecated, so neither suits a macOS 13 deployment target.
+                Toggle(isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { newValue in
+                        LoginItem.set(newValue)
+                        launchAtLogin = LoginItem.isEnabled   // reflect actual state
+                    }
+                )) {
                     Text(l.launchAtLogin).font(.system(size: 12))
                 }
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-                .onChange(of: launchAtLogin) { _, newValue in
-                    LoginItem.set(newValue)
-                    launchAtLogin = LoginItem.isEnabled   // reflect actual state
-                }
 
                 HStack {
                     Toggle(isOn: $store.alertsEnabled) {

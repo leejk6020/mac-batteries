@@ -70,29 +70,68 @@ xcrun stapler staple dist/BatteryBar.dmg
 
 인증서가 있으시면 위 과정을 스크립트로 만들어드릴 수 있습니다.
 
-## 동작 방식
+## Mac App Store 제출
 
-배터리 데이터는 macOS 내장 명령을 파싱해서 얻습니다:
+App Store 빌드는 `BatteryBar.xcodeproj` 로 만듭니다 (`build.sh` 의 `swiftc` 방식으로는
+Archive/업로드가 불가능). 프로젝트는 App Sandbox가 켜진 상태이므로 **에어팟은 지원되지
+않습니다** — 아래 "App Sandbox 제약" 참고.
 
 ```sh
-system_profiler SPBluetoothDataType -json
+./tools/make_appstore_pkg.sh    # archive → 서명된 build/appstore/BatteryBar.pkg
 ```
 
-`device_connected` 목록에서 각 기기의
-`device_batteryLevelMain` / `Case` / `Left` / `Right` 값을 읽어옵니다.
-별도 권한이나 백그라운드 데몬이 필요 없습니다.
+사전 준비는 **Xcode → Settings → Accounts 에 Apple ID 로그인** 하나뿐입니다.
+`Apple Distribution` / `3rd Party Mac Developer Installer` 인증서와 프로비저닝
+프로파일은 `-allowProvisioningUpdates` 가 자동 생성합니다.
+
+업로드는 Xcode **Organizer → Distribute App**, Transporter 앱, 또는:
+
+```sh
+xcrun altool --upload-app -f build/appstore/BatteryBar.pkg -t macos \
+    --apple-id <Apple ID> --password <앱 암호>
+```
+
+> 업로드 전에 App Store Connect에서 번들 ID `com.jklee.batterybar` 로
+> **앱 레코드를 먼저 생성**해야 합니다.
+
+앱 설명에 **에어팟을 언급하지 마세요** — 샌드박스 빌드에서는 동작하지 않으므로
+심사 거부 및 부정적 리뷰 사유가 됩니다.
+
+## 동작 방식
+
+배터리 데이터는 두 소스를 병합해서 얻습니다. 어느 쪽도 단독으로는 완전하지 않습니다.
+
+| 소스 | 커버리지 | 샌드박스에서 |
+|------|----------|--------------|
+| IORegistry (`AppleDeviceManagementHIDEventService` 의 `BatteryPercent`) | Magic Keyboard / Mouse / Trackpad | **동작** |
+| `system_profiler SPBluetoothDataType -json` | AirPods(`Case`/`Left`/`Right`) 및 서드파티 기기 | **빈 결과** |
+
+별도 권한이나 백그라운드 데몬은 필요 없습니다.
+
+### App Sandbox 제약
+
+App Sandbox 안에서 `system_profiler` 는 실패하지 않고 **성공한 것처럼 빈 목록을
+반환**합니다. macOS 26 기준 에어팟 배터리는 IORegistry 어디에도 없으므로
+(`BatteryPercent` 키는 레지스트리 전체에서 Magic Keyboard 하나뿐),
+**샌드박스 빌드는 에어팟을 지원할 수 없습니다.**
+
+- 기본 빌드 = 샌드박스 없음 → 전체 기기 지원, 직접 배포(Developer ID + 공증)용
+- `SANDBOX=1 ./build.sh` → Mac App Store 제출용, Apple HID 액세서리만 지원
 
 ## 구조
 
 | 파일 | 설명 |
 |------|------|
 | `Sources/App.swift` | 전체 앱 (모델·데이터 조회·SwiftUI 뷰) |
+| `BatteryBar.xcodeproj` | App Store 제출용 Xcode 프로젝트 (Archive/업로드) |
 | `Info.plist` | 번들 메타데이터 (`LSUIElement`=메뉴바 전용, Dock 아이콘 없음) |
-| `build.sh` | `swiftc`로 `.app` 번들 생성 + 아이콘 삽입 + ad-hoc 서명 |
+| `build.sh` | `swiftc`로 `.app` 번들 생성 + 아이콘 삽입 + 샌드박스 서명 |
+| `BatteryBar.entitlements` | App Sandbox 활성화 (Mac App Store 필수) |
 | `Resources/AppIcon.icns` | 앱 아이콘 (배터리 + 블루투스) |
 | `tools/make_icon.swift` | 아이콘 생성기 (CoreGraphics로 1024px PNG 렌더) |
 | `tools/make_icns.sh` | PNG → iconset → `.icns` 변환 |
 | `tools/make_dmg.sh` | 배포용 `dist/BatteryBar.dmg` 생성 (설치 안내 포함) |
+| `tools/make_appstore_pkg.sh` | App Store 제출용 서명된 `.pkg` 생성 (archive + export) |
 | `CHANGELOG.md` | 버전별 업데이트 이력 (업데이트 페이지 소스) |
 
 ## 아이콘 다시 만들기

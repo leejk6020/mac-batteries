@@ -9,3 +9,7 @@ dist/
 .build/
 *.xcuserstate
 DerivedData/
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
